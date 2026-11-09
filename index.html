@@ -201,9 +201,16 @@ function renderTabs(){
     nav.append(el("button", {class: "tab" + (UI.tab === id ? " on" : ""), onclick: () => { UI.tab = id; render(); }}, name));
 }
 
-const SECS = ["Theory", "Practical", "Test"];
-const SEC_ICON = {Theory: "📖", Practical: "🏍️", Test: "📝"};
+const SECS = ["Theory", "Practical", "Revision", "Test"];          // BBDC's own tabs, in BBDC's order
+const SEC_ICON = {Theory: "📖", Practical: "🏍️", Revision: "🔁", Test: "📝"};
 function secOf(k){ const w = D.w.find(x => x.k === k); return (w && SECS.includes(w.sec)) ? w.sec : "Practical"; }
+function wOf(k){ return D.w.find(x => x.k === k) || {k: k}; }
+function nameOf(k){ const w = wOf(k); return w.nm || w.k; }                 // 'Subject 5.2 · Circuit', 'PPL 1.02 · Defensive…'
+function shortName(k){                                                       // chips: 'Subject 5.2', 'PPL 1.02'
+  const w = wOf(k);
+  return w.nm && (w.sec === "Practical" || w.sec === "Revision") ? w.nm.split(" · ")[0] : w.k;
+}
+function orderIdx(k){ const i = D.w.findIndex(x => x.k === k); return i < 0 ? 1e9 : i; }   // bot sends BBDC's order
 /* [[section, items]] in Theory / Practical / Test order, empty sections left out */
 function groupBySec(items, keyOf){ return SECS.map(s => [s, items.filter(x => secOf(keyOf(x)) === s)]).filter(g => g[1].length); }
 function secHead(s){ return el("h3", {class: "sech"}, SEC_ICON[s] + " " + s); }
@@ -215,6 +222,7 @@ function viewSlots(){
   const out = [];
   const lessons = Object.keys(D.s || {});
   if (!lessons.length) return [el("div", {class: "card"}, "No slot data yet. Send /go (or /check) in the chat, then /app again.")];
+  lessons.sort((a, b) => orderIdx(a) - orderIdx(b));
   const groups = groupBySec(lessons, k => k);
   if (!UI.lesson || !lessons.includes(UI.lesson)) UI.lesson = groups[0][1][0];
   const sec = secOf(UI.lesson);
@@ -224,7 +232,8 @@ function viewSlots(){
        SEC_ICON[s] + " " + s + " · " + ks.reduce((n, k) => n + count(k), 0)))));
   out.push(el("div", {class: "chips"}, groups.find(g => g[0] === sec)[1].map(k =>
     el("button", {class: "chip" + (k === UI.lesson ? " on" : ""), onclick: () => { UI.lesson = k; UI.day = null; render(); }},
-       k + " · " + count(k)))));
+       shortName(k) + " · " + count(k)))));
+  if (nameOf(UI.lesson) !== shortName(UI.lesson)) out.push(el("div", {class: "hint"}, nameOf(UI.lesson)));
   const rows = D.s[UI.lesson] || [];
   const w = D.w.find(x => x.k === UI.lesson);
   out.push(el("div", {class: "hint"}, "🕒 Checked " + (w && w.ck ? hhmm(w.ck) + " (" + ago(w.ck, now()) + ")" : "—")
@@ -271,8 +280,9 @@ function viewWatch(){
    for (const w of ws){
     const marks = (w.nw ? " 🆕" : "") + (w.fl ? " 🎯" : "");
     card.append(el("label", {class: "row"},
-      el("div", {class: "grow"}, el("div", null, w.k + marks),
-         el("div", {class: "hint"}, [w.bk ? "📌 " + w.bk : "", w.n >= 0 ? w.n + " open" : ""].filter(Boolean).join(" · ") || " ")),
+      el("div", {class: "grow"}, el("div", null, nameOf(w.k) + marks),
+         el("div", {class: "hint"}, [w.dn ? "✅ Completed" : "", w.bk ? "📌 " + w.bk : "", w.n >= 0 ? w.n + " open" : ""]
+                                      .filter(Boolean).join(" · ") || " ")),
       el("span", {class: "switch"},
          el("input", {type: "checkbox", checked: curOn(w.k), onchange: e => { E.w[w.k] = e.target.checked; changed(); }}),
          el("span"))));
@@ -309,7 +319,7 @@ function viewFilters(){
   const out = [];
   for (const [sec, ws] of groupBySec(on, w => w.k)){
     out.push(secHead(sec));
-    for (const w of ws) out.push(el("div", {class: "card"}, el("h3", null, w.k),
+    for (const w of ws) out.push(el("div", {class: "card"}, el("h3", null, nameOf(w.k)),
       el("div", {class: "hint"}, filterShort(effFilter(w.k))), filterEditor(w.k)));
   }
   return out;
