@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BBDC Dashboard</title>
+<!-- No secrets here. The bot passes a snapshot in the URL fragment (#d=...), which browsers never send
+     to the web host. Changes go back to the bot with Telegram.WebApp.sendData (reply-keyboard button only). -->
+<script>window.__HASH = location.hash;</script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);
+  --text:var(--tg-theme-text-color,#111);
+  --hint:var(--tg-theme-hint-color,#888);
+  --link:var(--tg-theme-link-color,#2481cc);
+  --btn:var(--tg-theme-button-color,#2481cc);
+  --btn-text:var(--tg-theme-button-text-color,#fff);
+  --card:var(--tg-theme-secondary-bg-color,#f1f2f6);
+  --section:var(--tg-theme-section-bg-color,var(--bg));
+  --accent:var(--tg-theme-accent-text-color,var(--link));
+  --danger:var(--tg-theme-destructive-text-color,#e53935);
+  --sep:var(--tg-theme-section-separator-color,rgba(127,127,127,.25));
+}
+@media (prefers-color-scheme: dark){
+  :root:not(.in-tg){--bg:#17212b;--text:#f5f5f5;--hint:#8a9aa9;--link:#5eb5f7;--btn:#5288c1;--card:#232e3c;--section:#17212b}
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+body{padding:0 12px 90px}
+header{padding:10px 2px 4px}
+h1{font-size:18px;margin:0}
+.hint{color:var(--hint);font-size:13px}
+.err{color:var(--danger);font-size:13px}
+nav{display:flex;gap:6px;overflow-x:auto;padding:8px 0;position:sticky;top:0;background:var(--bg);z-index:2;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+.tab,.chip{border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--text);font:inherit;font-size:14px;white-space:nowrap;cursor:pointer}
+.tab.on,.chip.on{background:var(--btn);color:var(--btn-text)}
+.card .chip:not(.on){background:var(--bg)}
+.chip.off{text-decoration:line-through;opacity:.75}
+.card{background:var(--card);border-radius:12px;padding:10px 12px;margin:8px 0}
+.row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--sep)}
+.row:last-child{border-bottom:0}
+.grow{flex:1;min-width:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.banner{background:var(--card);border-left:3px solid var(--accent);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:14px}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center;font-size:13px}
+.cal .dn{color:var(--hint);font-size:11px}
+.cal .d{padding:6px 0;border-radius:8px}
+.cal .has{background:var(--btn);color:var(--btn-text);font-weight:600;cursor:pointer}
+.cal .sel{outline:2px solid var(--text)}
+.cal small{display:block;font-size:10px;font-weight:400;opacity:.9}
+h3{font-size:15px;margin:12px 0 4px}
+input[type=text]{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--sep);background:var(--bg);color:var(--text);width:7em}
+.switch{position:relative;width:44px;height:26px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch span{position:absolute;inset:0;background:var(--sep);border-radius:13px;transition:.15s}
+.switch span:before{content:"";position:absolute;left:3px;top:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
+.switch input:checked+span{background:var(--btn)}
+.switch input:checked+span:before{transform:translateX(18px)}
+.btn{display:block;width:100%;border:0;border-radius:10px;padding:11px;margin:6px 0;background:var(--btn);color:var(--btn-text);font:inherit;font-weight:600;cursor:pointer}
+.btn.alt{background:var(--card);color:var(--text)}
+#savebar{position:fixed;left:0;right:0;bottom:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--sep);display:none}
+select{font:inherit;padding:6px;border-radius:8px;background:var(--bg);color:var(--text);border:1px solid var(--sep)}
+</style>
+</head>
+<body>
+<header><h1>🏍️ BBDC Dashboard</h1><div id="age" class="hint"></div></header>
+<nav id="tabs"></nav>
+<main id="view"><p class="hint">Loading…</p></main>
+<div id="savebar"><button class="btn" id="savebtn"></button></div>
+<script>
+"use strict";
+/* ---------------- pure logic (also exercised by tests via window.BBDCApp) ---------------- */
+const DAYS = ["mon","tue","wed","thu","fri","sat","sun"];
+const DAY_NAME = {mon:"Mon",tue:"Tue",wed:"Wed",thu:"Thu",fri:"Fri",sat:"Sat",sun:"Sun"};
+const MAX_SEND = 4096;                       // Telegram's sendData limit (bytes)
+const CMDS = ["/go","/pause","/check","/slots","/status"];
+
+function hashParam(hash, name){
+  const h = (hash || "").replace(/^#/, "");
+  for (const part of h.split("&")){
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i) === name) return part.slice(i + 1);
+  }
+  return "";
+}
+function b64urlBytes(s){
+  s = decodeURIComponent(s).replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function inflate(bytes){
+  if (typeof DecompressionStream === "undefined") throw new Error("nodecomp");
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return await new Response(stream).text();
+}
+async function decode(hash){
+  const d = hashParam(hash, "d");
+  if (!d) throw new Error("nodata");
+  const j = JSON.parse(await inflate(b64urlBytes(d)));
+  if (!j || j.v !== 1) throw new Error("version");
+  return j;
+}
+function mmdd(iso){ return iso ? String(iso).slice(5, 10) : ""; }
+function validDate(t){
+  t = (t || "").trim();
+  return t === "" || /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(t) || /^\d{4}-\d{2}-\d{2}$/.test(t);
+}
+function sortDays(s){ return DAYS.filter(d => (s || []).includes(d)); }
+function filterShort(f){
+  if (f === "same") return "same as all lessons";
+  const p = [];
+  if (f.b) p.push("before " + f.b);
+  if (f.s && f.s.length) p.push("skip " + sortDays(f.s).map(d => DAY_NAME[d]).join(", "));
+  return p.join(" · ") || "every date";
+}
+/* original values from the bot's snapshot, in the same shape the editor uses */
+function origOn(D, k){ const w = D.w.find(x => x.k === k); return !!(w && w.on); }
+function origFilter(D, t){
+  if (t === "*") return {b: mmdd(D.f.b), s: sortDays(D.f.s)};
+  const w = D.w.find(x => x.k === t);
+  return w && w.fl ? {b: mmdd(w.fl.b), s: sortDays(w.fl.s)} : "same";
+}
+function sameFilter(a, b){
+  if (a === "same" || b === "same") return a === b;
+  return (a.b || "") === (b.b || "") && sortDays(a.s).join() === sortDays(b.s).join();
+}
+/* only what changed, so the reply stays small: {w:{lesson:bool}, f:{target:"same"|{b,s}}, c:"/go"} */
+function buildPayload(D, E, cmd){
+  const p = {}, w = {}, f = {};
+  for (const k in E.w) if (E.w[k] !== origOn(D, k)) w[k] = E.w[k];
+  for (const t in E.f){
+    const v = E.f[t];
+    if (!sameFilter(v, origFilter(D, t))) f[t] = v === "same" ? "same" : {b: (v.b || "").trim(), s: sortDays(v.s)};
+  }
+  if (Object.keys(w).length) p.w = w;
+  if (Object.keys(f).length) p.f = f;
+  if (cmd && CMDS.includes(cmd)) p.c = cmd;
+  return p;
+}
+function countChanges(p){ return Object.keys(p.w || {}).length + Object.keys(p.f || {}).length; }
+function payloadBytes(p){ return new TextEncoder().encode(JSON.stringify(p)).length; }
+function ampm(t){
+  const m = /^(\d{1,2}):(\d{2})/.exec(t || "");
+  if (!m) return t || "?";
+  const h = +m[1];
+  return ((h % 12) || 12) + "." + m[2] + (h < 12 ? "am" : "pm");
+}
+function timeIcon(t){ const h = parseInt(t, 10); return isNaN(h) ? "•" : h < 12 ? "☀️" : h < 17 ? "🌤️" : "🌙"; }
+function dayLabel(iso){
+  const d = new Date(iso + "T00:00:00");
+  return isNaN(d) ? iso : d.toLocaleDateString("en-GB", {weekday: "short", day: "numeric", month: "short"});
+}
+function hhmm(sec){ return sec ? new Date(sec * 1000).toLocaleTimeString("en-GB", {hour: "2-digit", minute: "2-digit"}) : "—"; }
+function ago(sec, now){
+  const m = Math.floor((now - sec) / 60);
+  return m < 1 ? "just now" : m < 60 ? m + " min ago" : Math.floor(m / 60) + "h " + (m % 60) + "m ago";
+}
+function loginText(lg, now){
+  if (!lg) return "🔑 Not logged in";
+  const mins = Math.max(0, Math.floor((lg - now) / 60));
+  if (mins <= 0) return "🔑 Login has run out";
+  return "🔑 Login valid until " + hhmm(lg) + " (" + Math.floor(mins / 60) + "h " + (mins % 60) + "m left)";
+}
+
+/* ---------------- UI ---------------- */
+const TG = window.Telegram && window.Telegram.WebApp;
+const IN_TG = !!(TG && TG.platform && TG.platform !== "unknown");
+if (IN_TG) document.documentElement.classList.add("in-tg");
+let D = null;
+const E = {w: {}, f: {}};
+const UI = {tab: "slots", lesson: null, day: null, bkSec: null, mode: {}};
+const $ = s => document.querySelector(s);
+
+function el(tag, attrs, ...kids){
+  const e = document.createElement(tag);
+  for (const k in (attrs || {})){
+    if (k === "class") e.className = attrs[k];
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+    else if (k === "checked" || k === "value") e[k] = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return e;
+}
+const now = () => Date.now() / 1000;
+
+const TABS = [["slots","📅 Slots"],["watch","👀 Watch"],["filters","🎯 Filters"],["bookings","📒 Bookings"],
+              ["progress","📚 Progress"],["status","ℹ️ Status"]];
+
+function renderTabs(){
+  const nav = $("#tabs"); nav.textContent = "";
+  for (const [id, name] of TABS)
+    nav.append(el("button", {class: "tab" + (UI.tab === id ? " on" : ""), onclick: () => { UI.tab = id; render(); }}, name));
+}
+
+function curOn(k){ return k in E.w ? E.w[k] : origOn(D, k); }
+function curFilter(t){ return t in E.f ? E.f[t] : origFilter(D, t); }
+
+function viewSlots(){
+  const out = [];
+  const lessons = Object.keys(D.s || {});
+  if (!lessons.length) return [el("div", {class: "card"}, "No slot data yet. Send /go (or /check) in the chat, then /app again.")];
+  if (!UI.lesson || !lessons.includes(UI.lesson)) UI.lesson = lessons[0];
+  out.push(el("div", {class: "chips"}, lessons.map(k =>
+    el("button", {class: "chip" + (k === UI.lesson ? " on" : ""), onclick: () => { UI.lesson = k; UI.day = null; render(); }},
+       k + " · " + (D.sc && D.sc[k] != null ? D.sc[k] : D.s[k].length)))));
+  const rows = D.s[UI.lesson] || [];
+  const w = D.w.find(x => x.k === UI.lesson);
+  out.push(el("div", {class: "hint"}, "🕒 Checked " + (w && w.ck ? hhmm(w.ck) + " (" + ago(w.ck, now()) + ")" : "—")
+    + (w && w.fl ? " · 🎯 " + filterShort(origFilter(D, UI.lesson)) : " · filter: " + filterShort(origFilter(D, "*")))));
+  if (D.sc && D.sc[UI.lesson] > rows.length)
+    out.push(el("div", {class: "banner"}, "Showing the first " + rows.length + " of " + D.sc[UI.lesson] + " slots (to fit). Send /slots for all."));
+  if (!rows.length){ out.push(el("div", {class: "card"}, "Nothing open right now (matching your filters).")); return out; }
+  const byDay = {};
+  for (const r of rows) (byDay[r[0]] = byDay[r[0]] || []).push(r);
+  const days = Object.keys(byDay).sort();
+  // month grids
+  let y = +days[0].slice(0, 4), m = +days[0].slice(5, 7) - 1;
+  const last = days[days.length - 1];
+  while (y * 12 + m <= +last.slice(0, 4) * 12 + (+last.slice(5, 7) - 1)){
+    const first = new Date(y, m, 1);
+    const card = el("div", {class: "card"}, el("h3", null, first.toLocaleDateString("en-GB", {month: "long", year: "numeric"})));
+    const grid = el("div", {class: "cal"}, ["M","T","W","T","F","S","S"].map(x => el("div", {class: "dn"}, x)));
+    for (let i = 0; i < (first.getDay() + 6) % 7; i++) grid.append(el("div"));
+    const dim = new Date(y, m + 1, 0).getDate();
+    for (let d = 1; d <= dim; d++){
+      const iso = y + "-" + String(m + 1).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+      const n = (byDay[iso] || []).length;
+      grid.append(n ? el("div", {class: "d has" + (UI.day === iso ? " sel" : ""), onclick: () => { UI.day = UI.day === iso ? null : iso; render(); }},
+                         d, el("small", null, n))
+                    : el("div", {class: "d"}, d));
+    }
+    card.append(grid); out.push(card);
+    if (++m > 11){ m = 0; y++; }
+  }
+  for (const d of (UI.day ? [UI.day] : days)){
+    out.push(el("div", {class: "card"}, el("b", null, "📅 " + dayLabel(d)),
+      byDay[d].map(r => el("div", {class: "row"}, timeIcon(r[1]) + " Session " + r[3] + " · " + ampm(r[1]) + " – " + ampm(r[2])))));
+  }
+  out.push(el("p", {class: "hint"}, "Book in the BBDC site or app yourself. This bot never books."));
+  return out;
+}
+
+function viewWatch(){
+  if (!D.w.length) return [el("div", {class: "card"}, "No lessons learned yet. Open a lesson's slot page once in the bot's browser on the PC.")];
+  const card = el("div", {class: "card"});
+  for (const w of D.w){
+    const marks = (w.nw ? " 🆕" : "") + (w.fl ? " 🎯" : "");
+    card.append(el("label", {class: "row"},
+      el("div", {class: "grow"}, el("div", null, w.k + marks),
+         el("div", {class: "hint"}, [w.bk ? "📌 " + w.bk : "", w.n >= 0 ? w.n + " open" : ""].filter(Boolean).join(" · ") || " ")),
+      el("span", {class: "switch"},
+         el("input", {type: "checkbox", checked: curOn(w.k), onchange: e => { E.w[w.k] = e.target.checked; changed(); }}),
+         el("span"))));
+  }
+  return [card, el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates")];
+}
+
+function filterEditor(t){
+  const v = curFilter(t);
+  const box = el("div");
+  if (t !== "*"){
+    const guess = v === "same" ? "same" : (!v.b && !(v.s || []).length ? "every" : "own");
+    const mode = UI.mode[t] || guess;
+    box.append(el("div", {class: "chips"}, [["same","🌐 Same as all"],["every","📆 Every date"],["own","✏️ Own dates"]].map(([id, name]) =>
+      el("button", {class: "chip" + (mode === id ? " on" : ""), onclick: () => {
+        UI.mode[t] = id;
+        if (id === "same") E.f[t] = "same";
+        else if (id === "every") E.f[t] = {b: "", s: []};
+        else if (v === "same") E.f[t] = {b: origFilter(D, "*").b, s: origFilter(D, "*").s.slice()};
+        changed(); }}, name))));
+    if (mode !== "own") return box;
+  }
+  const f = v === "same" ? {b: "", s: []} : v;
+  const err = el("div", {class: "err"});
+  const inp = el("input", {type: "text", inputmode: "numeric", placeholder: "MM-DD", value: f.b || "",
+    onchange: e => { const val = e.target.value.trim();
+      if (!validDate(val)){ err.textContent = "Use MM-DD, e.g. 11-20 for 20 Nov"; return; }
+      err.textContent = ""; E.f[t] = {b: val, s: sortDays(f.s)}; changed(); }});
+  box.append(el("div", {class: "row"}, el("div", {class: "grow"}, "Only slots before", el("div", {class: "hint"}, "MM-DD, empty = no limit")), inp), err);
+  box.append(el("div", {class: "hint"}, "Days you can't make:"));
+  box.append(el("div", {class: "chips"}, DAYS.map(d => el("button", {class: "chip" + ((f.s || []).includes(d) ? " on off" : ""),
+    onclick: () => { const s = (f.s || []).includes(d) ? f.s.filter(x => x !== d) : (f.s || []).concat(d);
+      E.f[t] = {b: inp.value.trim() || f.b || "", s: sortDays(s)}; changed(); }}, DAY_NAME[d]))));
+  return box;
+}
+
+function viewFilters(){
+  const out = [el("div", {class: "card"}, el("h3", null, "🌐 All lessons"), el("div", {class: "hint"}, "Now: " + filterShort(curFilter("*"))), filterEditor("*"))];
+  for (const w of D.w){
+    out.push(el("div", {class: "card"}, el("h3", null, (curOn(w.k) ? "✅ " : "⬜ ") + w.k),
+      el("div", {class: "hint"}, "Now: " + filterShort(curFilter(w.k))), filterEditor(w.k)));
+  }
+  return out;
+}
+
+function viewBookings(){
+  const secs = ["Theory", "Practical", "Test"];
+  UI.bkSec = UI.bkSec || "Practical";
+  const out = [el("div", {class: "chips"}, secs.map(s => el("button", {class: "chip" + (s === UI.bkSec ? " on" : ""), onclick: () => { UI.bkSec = s; render(); }}, s)))];
+  const items = (D.bk || {})[UI.bkSec];
+  if (items == null) out.push(el("div", {class: "card"}, D.bk ? "Not loaded yet. Send /bookings in the chat, then /app again." : "Left out to fit. Send /bookings in the chat."));
+  else if (!items.length) out.push(el("div", {class: "card"}, "Nothing booked."));
+  else for (const x of items.slice().sort((a, b) => (a[0] + a[1]).localeCompare(b[0] + b[1])))
+    out.push(el("div", {class: "card"}, el("b", null, "📅 " + dayLabel(x[0])),
+      el("div", null, timeIcon(x[1]) + " " + ampm(x[1]) + " – " + ampm(x[2]) + " · " + x[3] + (x[4] ? " " + x[4] : "") + " (Session " + x[5] + ")")));
+  return out;
+}
+
+function viewProgress(){
+  if (!D.pr) return [el("div", {class: "card"}, "No progress read yet. Send /progress in the chat, then /app again.")];
+  const out = [];
+  for (const sec in D.pr){
+    const it = D.pr[sec];
+    const done = it.filter(x => x[2] === 0), can = it.filter(x => x[2] === 1), locked = it.filter(x => x[2] === 2);
+    out.push(el("div", {class: "card"}, el("h3", null, sec + " · " + done.length + "/" + it.length + " done"),
+      can.length ? el("div", null, "🟢 Can book: " + can.map(x => x[0]).join(", ")) : null,
+      locked.length ? el("div", null, "🔒 Locked: " + locked.map(x => x[0] + (x[3] ? " (after " + x[3] + ")" : "")).join(", ")) : null,
+      done.length ? el("div", {class: "hint"}, "✅ Done: " + done.map(x => x[0]).join(", ")) : null));
+  }
+  return out;
+}
+
+function viewStatus(){
+  const st = {running: "👀 Watching " + (D.w.filter(w => w.on).map(w => w.k).join(", ") || "nothing"),
+              paused: "⏸️ Not watching right now", awaiting_login: "🔐 Logging in to BBDC (answer the CAPTCHA in the chat)"}[D.st] || D.st;
+  const t = now();
+  const lines = [st];
+  if (D.busy) lines.push("🐢 BBDC is busy, so I'm checking less often.");
+  if (D.st === "running" && D.nx != null){
+    const left = Math.max(0, D.at + D.nx - t);
+    lines.push("⏱️ Next check " + (left < 60 ? "in under a minute" : "in about " + Math.round(left / 60) + " min"));
+  }
+  const ck = D.ck || [0, 0, 0];
+  lines.push(ck[0] ? "🕒 Last checked " + hhmm(ck[0]) + " (" + ago(ck[0], t) + ") " + (ck[1] ? "✅" : "⚠️ failed" + (ck[2] ? ", last good " + hhmm(ck[2]) : "")) : "🕒 Not checked yet.");
+  lines.push(loginText(D.lg, t));
+  if (D.bal) lines.push("💰 Balance $" + Number(D.bal[0]).toFixed(2) + " (seen " + hhmm(D.bal[1]) + ")");
+  if (D.hl) lines.push("🩺 Health: " + D.hl);
+  const out = [el("div", {class: "card"}, lines.map(l => el("div", {class: "row"}, l)))];
+  const acts = D.st === "running" ? [["/check","🔄 Check now"],["/pause","⏸️ Pause"]] : [["/go","▶️ Start watching"]];
+  for (const [c, name] of acts) out.push(el("button", {class: "btn" + (c === "/pause" ? " alt" : ""), onclick: () => send(c)}, name));
+  out.push(el("p", {class: "hint"}, "Buttons close the dashboard and send the command (plus any unsaved changes) to the bot."));
+  return out;
+}
+
+const VIEWS = {slots: viewSlots, watch: viewWatch, filters: viewFilters, bookings: viewBookings, progress: viewProgress, status: viewStatus};
+
+function render(){
+  renderTabs();
+  const v = $("#view"); v.textContent = "";
+  if (D.tr) v.append(el("div", {class: "banner"}, "Some details were left out to fit. Send /slots or /bookings in the chat for everything."));
+  v.append(...VIEWS[UI.tab]());
+  if (!IN_TG) v.append(el("p", {class: "hint"}, "Open this from the 📱 Dashboard button in the bot's chat to save changes."));
+}
+
+function changed(){
+  const n = countChanges(buildPayload(D, E));
+  const text = n ? "💾 Save " + n + " change" + (n > 1 ? "s" : "") : "";
+  if (IN_TG && TG.MainButton){
+    if (n){ TG.MainButton.setText(text); TG.MainButton.show(); } else TG.MainButton.hide();
+  } else {
+    $("#savebar").style.display = n ? "block" : "none";
+    $("#savebtn").textContent = text;
+  }
+  render();
+}
+
+function send(cmd){
+  const p = buildPayload(D, E, cmd);
+  if (!countChanges(p) && !p.c) return;
+  if (payloadBytes(p) > MAX_SEND){ alert("Too many changes at once. Save some, then reopen the dashboard."); return; }
+  if (!IN_TG){ alert("Open this from the 📱 Dashboard button in Telegram to save."); return; }
+  TG.sendData(JSON.stringify(p));                 // Telegram closes the app and gives this to the bot
+}
+
+function fail(why){
+  const msg = {nodata: "No data. Send /app in the bot chat and tap 📱 Dashboard.",
+               nodecomp: "Your Telegram app is too old to open this. Update Telegram, or use /slots and /status in the chat.",
+               version: "This dashboard and the bot don't match. Send /app again."}[why] || "Couldn't read the data. Send /app again (or use /slots).";
+  $("#view").textContent = ""; $("#view").append(el("div", {class: "card"}, msg));
+}
+
+let started = false;
+async function start(testHash){              // testHash: lets a test feed a snapshot in directly
+  if (!started){
+    started = true;
+    if (TG){ try { TG.ready(); TG.expand(); } catch (e) {} }
+    if (IN_TG && TG.MainButton) TG.MainButton.onClick(() => send(null));
+    $("#savebtn").addEventListener("click", () => send(null));
+  }
+  let hash = testHash || window.__HASH || location.hash;
+  if (!hashParam(hash, "d") && TG && window.Telegram.WebView && window.Telegram.WebView.initParams)
+    hash = "#d=" + (window.Telegram.WebView.initParams.d || "");
+  try { D = await decode(hash); } catch (e) { fail(e.message); return; }
+  $("#age").textContent = "Data from " + hhmm(D.at) + " (" + ago(D.at, now()) + "). Send /app for fresh data.";
+  render();
+}
+
+window.BBDCApp = {hashParam, decode, buildPayload, countChanges, payloadBytes, validDate, filterShort, origFilter,
+                  ampm, loginText, get D(){ return D; }, E, UI, render, send, start};
+start();
+</script>
+</body>
+</html>
