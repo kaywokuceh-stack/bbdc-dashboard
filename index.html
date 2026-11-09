@@ -37,6 +37,8 @@ nav::-webkit-scrollbar{display:none}
 .tab,.chip{border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--text);font:inherit;font-size:14px;white-space:nowrap;cursor:pointer}
 .tab.on,.chip.on{background:var(--btn);color:var(--btn-text)}
 .card .chip:not(.on){background:var(--bg)}
+.sech{margin:14px 2px 2px;color:var(--hint);font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+.seg .tab{flex:1}
 .pickwrap{position:relative;display:inline-block}
 .pickwrap .pick{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:0;padding:0}
 .chip.off{text-decoration:line-through;opacity:.75}
@@ -199,6 +201,13 @@ function renderTabs(){
     nav.append(el("button", {class: "tab" + (UI.tab === id ? " on" : ""), onclick: () => { UI.tab = id; render(); }}, name));
 }
 
+const SECS = ["Theory", "Practical", "Test"];
+const SEC_ICON = {Theory: "📖", Practical: "🏍️", Test: "📝"};
+function secOf(k){ const w = D.w.find(x => x.k === k); return (w && SECS.includes(w.sec)) ? w.sec : "Practical"; }
+/* [[section, items]] in Theory / Practical / Test order, empty sections left out */
+function groupBySec(items, keyOf){ return SECS.map(s => [s, items.filter(x => secOf(keyOf(x)) === s)]).filter(g => g[1].length); }
+function secHead(s){ return el("h3", {class: "sech"}, SEC_ICON[s] + " " + s); }
+
 function curOn(k){ return k in E.w ? E.w[k] : origOn(D, k); }
 function curFilter(t){ return t in E.f ? E.f[t] : origFilter(D, t); }
 
@@ -206,10 +215,16 @@ function viewSlots(){
   const out = [];
   const lessons = Object.keys(D.s || {});
   if (!lessons.length) return [el("div", {class: "card"}, "No slot data yet. Send /go (or /check) in the chat, then /app again.")];
-  if (!UI.lesson || !lessons.includes(UI.lesson)) UI.lesson = lessons[0];
-  out.push(el("div", {class: "chips"}, lessons.map(k =>
+  const groups = groupBySec(lessons, k => k);
+  if (!UI.lesson || !lessons.includes(UI.lesson)) UI.lesson = groups[0][1][0];
+  const sec = secOf(UI.lesson);
+  const count = k => D.sc && D.sc[k] != null ? D.sc[k] : D.s[k].length;
+  out.push(el("div", {class: "chips seg"}, groups.map(([s, ks]) =>
+    el("button", {class: "tab" + (s === sec ? " on" : ""), onclick: () => { UI.lesson = ks[0]; UI.day = null; render(); }},
+       SEC_ICON[s] + " " + s + " · " + ks.reduce((n, k) => n + count(k), 0)))));
+  out.push(el("div", {class: "chips"}, groups.find(g => g[0] === sec)[1].map(k =>
     el("button", {class: "chip" + (k === UI.lesson ? " on" : ""), onclick: () => { UI.lesson = k; UI.day = null; render(); }},
-       k + " · " + (D.sc && D.sc[k] != null ? D.sc[k] : D.s[k].length)))));
+       k + " · " + count(k)))));
   const rows = D.s[UI.lesson] || [];
   const w = D.w.find(x => x.k === UI.lesson);
   out.push(el("div", {class: "hint"}, "🕒 Checked " + (w && w.ck ? hhmm(w.ck) + " (" + ago(w.ck, now()) + ")" : "—")
@@ -249,8 +264,11 @@ function viewSlots(){
 
 function viewWatch(){
   if (!D.w.length) return [el("div", {class: "card"}, "No lessons learned yet. Open a lesson's slot page once in the bot's browser on the PC.")];
-  const card = el("div", {class: "card"});
-  for (const w of D.w){
+  const out = [];
+  for (const [sec, ws] of groupBySec(D.w, w => w.k)){
+   const card = el("div", {class: "card"});
+   out.push(secHead(sec), card);
+   for (const w of ws){
     const marks = (w.nw ? " 🆕" : "") + (w.fl ? " 🎯" : "");
     card.append(el("label", {class: "row"},
       el("div", {class: "grow"}, el("div", null, w.k + marks),
@@ -258,8 +276,9 @@ function viewWatch(){
       el("span", {class: "switch"},
          el("input", {type: "checkbox", checked: curOn(w.k), onchange: e => { E.w[w.k] = e.target.checked; changed(); }}),
          el("span"))));
+   }
   }
-  return [card, el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates")];
+  return out.concat(el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates"));
 }
 
 /* what actually applies to a lesson: its own dates, or (if it has none) the bot's all-lessons dates */
@@ -287,8 +306,13 @@ function filterEditor(t){
 function viewFilters(){
   const on = D.w.filter(w => curOn(w.k));
   if (!on.length) return [el("div", {class: "card"}, "You're not watching any lessons. Turn some on in 👀 Watch first.")];
-  return on.map(w => el("div", {class: "card"}, el("h3", null, w.k),
-    el("div", {class: "hint"}, filterShort(effFilter(w.k))), filterEditor(w.k)));
+  const out = [];
+  for (const [sec, ws] of groupBySec(on, w => w.k)){
+    out.push(secHead(sec));
+    for (const w of ws) out.push(el("div", {class: "card"}, el("h3", null, w.k),
+      el("div", {class: "hint"}, filterShort(effFilter(w.k))), filterEditor(w.k)));
+  }
+  return out;
 }
 
 function viewBookings(){
