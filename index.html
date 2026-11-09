@@ -37,6 +37,8 @@ nav::-webkit-scrollbar{display:none}
 .tab,.chip{border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--text);font:inherit;font-size:14px;white-space:nowrap;cursor:pointer}
 .tab.on,.chip.on{background:var(--btn);color:var(--btn-text)}
 .card .chip:not(.on){background:var(--bg)}
+.pickwrap{position:relative;display:inline-block}
+.pickwrap .pick{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:0;padding:0}
 .chip.off{text-decoration:line-through;opacity:.75}
 .card{background:var(--card);border-radius:12px;padding:10px 12px;margin:8px 0}
 .row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--sep)}
@@ -104,25 +106,25 @@ async function decode(hash){
   if (!j || j.v !== 1) throw new Error("version");
   return j;
 }
-function mmdd(iso){ return iso ? String(iso).slice(5, 10) : ""; }
-function validDate(t){
-  t = (t || "").trim();
-  return t === "" || /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(t) || /^\d{4}-\d{2}-\d{2}$/.test(t);
+function isoDay(iso){ return iso ? String(iso).slice(0, 10) : ""; }
+function niceDate(iso){                    // '2026-11-19' -> '19 Nov' (no numbers-only dates anywhere)
+  const d = new Date(isoDay(iso) + "T00:00:00");
+  return isNaN(d) ? String(iso || "") : d.toLocaleDateString("en-GB", {day: "numeric", month: "short"});
 }
 function sortDays(s){ return DAYS.filter(d => (s || []).includes(d)); }
 function filterShort(f){
   if (f === "same") return "same as all lessons";
   const p = [];
-  if (f.b) p.push("before " + f.b);
+  if (f.b) p.push("before " + niceDate(f.b));
   if (f.s && f.s.length) p.push("skip " + sortDays(f.s).map(d => DAY_NAME[d]).join(", "));
   return p.join(" · ") || "every date";
 }
 /* original values from the bot's snapshot, in the same shape the editor uses */
 function origOn(D, k){ const w = D.w.find(x => x.k === k); return !!(w && w.on); }
 function origFilter(D, t){
-  if (t === "*") return {b: mmdd(D.f.b), s: sortDays(D.f.s)};
+  if (t === "*") return {b: isoDay(D.f.b), s: sortDays(D.f.s)};
   const w = D.w.find(x => x.k === t);
-  return w && w.fl ? {b: mmdd(w.fl.b), s: sortDays(w.fl.s)} : "same";
+  return w && w.fl ? {b: isoDay(w.fl.b), s: sortDays(w.fl.s)} : "same";
 }
 function sameFilter(a, b){
   if (a === "same" || b === "same") return a === b;
@@ -172,7 +174,7 @@ const IN_TG = !!(TG && TG.platform && TG.platform !== "unknown");
 if (IN_TG) document.documentElement.classList.add("in-tg");
 let D = null;
 const E = {w: {}, f: {}};
-const UI = {tab: "slots", lesson: null, day: null, bkSec: null, mode: {}};
+const UI = {tab: "slots", lesson: null, day: null, bkSec: null};
 const $ = s => document.querySelector(s);
 
 function el(tag, attrs, ...kids){
@@ -260,42 +262,33 @@ function viewWatch(){
   return [card, el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates")];
 }
 
+/* what actually applies to a lesson: its own dates, or (if it has none) the bot's all-lessons dates */
+function effFilter(t){ const v = curFilter(t); return v === "same" ? curFilter("*") : v; }
+function todayIso(){ const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+
 function filterEditor(t){
-  const v = curFilter(t);
+  const f = effFilter(t);
+  const set = (b, s) => { E.f[t] = {b: b || "", s: sortDays(s)}; changed(); };
+  // the date picker sits invisibly on top of the button, so one tap opens the phone's own calendar
+  const pick = el("input", {type: "date", class: "pick", value: f.b || "", min: todayIso(),
+                            onchange: e => set(e.target.value, f.s)});
+  const open = () => { try { pick.showPicker(); } catch (e) {} };
+  const dateBtn = el("span", {class: "pickwrap"},
+    el("button", {class: "chip" + (f.b ? " on" : ""), onclick: open}, f.b ? "📅 Before " + niceDate(f.b) : "📅 Any date"), pick);
   const box = el("div");
-  if (t !== "*"){
-    const guess = v === "same" ? "same" : (!v.b && !(v.s || []).length ? "every" : "own");
-    const mode = UI.mode[t] || guess;
-    box.append(el("div", {class: "chips"}, [["same","🌐 Same as all"],["every","📆 Every date"],["own","✏️ Own dates"]].map(([id, name]) =>
-      el("button", {class: "chip" + (mode === id ? " on" : ""), onclick: () => {
-        UI.mode[t] = id;
-        if (id === "same") E.f[t] = "same";
-        else if (id === "every") E.f[t] = {b: "", s: []};
-        else if (v === "same") E.f[t] = {b: origFilter(D, "*").b, s: origFilter(D, "*").s.slice()};
-        changed(); }}, name))));
-    if (mode !== "own") return box;
-  }
-  const f = v === "same" ? {b: "", s: []} : v;
-  const err = el("div", {class: "err"});
-  const inp = el("input", {type: "text", inputmode: "numeric", placeholder: "MM-DD", value: f.b || "",
-    onchange: e => { const val = e.target.value.trim();
-      if (!validDate(val)){ err.textContent = "Use MM-DD, e.g. 11-20 for 20 Nov"; return; }
-      err.textContent = ""; E.f[t] = {b: val, s: sortDays(f.s)}; changed(); }});
-  box.append(el("div", {class: "row"}, el("div", {class: "grow"}, "Only slots before", el("div", {class: "hint"}, "MM-DD, empty = no limit")), inp), err);
-  box.append(el("div", {class: "hint"}, "Days you can't make:"));
+  box.append(el("div", {class: "chips"}, dateBtn,
+    f.b ? el("button", {class: "chip", onclick: () => set("", f.s)}, "✖ Any date") : null));
+  box.append(el("div", {class: "hint"}, "Can't make:"));
   box.append(el("div", {class: "chips"}, DAYS.map(d => el("button", {class: "chip" + ((f.s || []).includes(d) ? " on off" : ""),
-    onclick: () => { const s = (f.s || []).includes(d) ? f.s.filter(x => x !== d) : (f.s || []).concat(d);
-      E.f[t] = {b: inp.value.trim() || f.b || "", s: sortDays(s)}; changed(); }}, DAY_NAME[d]))));
+    onclick: () => set(f.b, (f.s || []).includes(d) ? f.s.filter(x => x !== d) : (f.s || []).concat(d))}, DAY_NAME[d]))));
   return box;
 }
 
 function viewFilters(){
-  const out = [el("div", {class: "card"}, el("h3", null, "🌐 All lessons"), el("div", {class: "hint"}, "Now: " + filterShort(curFilter("*"))), filterEditor("*"))];
-  for (const w of D.w){
-    out.push(el("div", {class: "card"}, el("h3", null, (curOn(w.k) ? "✅ " : "⬜ ") + w.k),
-      el("div", {class: "hint"}, "Now: " + filterShort(curFilter(w.k))), filterEditor(w.k)));
-  }
-  return out;
+  const on = D.w.filter(w => curOn(w.k));
+  if (!on.length) return [el("div", {class: "card"}, "You're not watching any lessons. Turn some on in 👀 Watch first.")];
+  return on.map(w => el("div", {class: "card"}, el("h3", null, w.k),
+    el("div", {class: "hint"}, filterShort(effFilter(w.k))), filterEditor(w.k)));
 }
 
 function viewBookings(){
@@ -400,7 +393,7 @@ async function start(testHash){              // testHash: lets a test feed a sna
   render();
 }
 
-window.BBDCApp = {hashParam, decode, buildPayload, countChanges, payloadBytes, validDate, filterShort, origFilter,
+window.BBDCApp = {hashParam, decode, buildPayload, countChanges, payloadBytes, niceDate, filterShort, origFilter,
                   ampm, loginText, get D(){ return D; }, E, UI, render, send, start};
 start();
 </script>
