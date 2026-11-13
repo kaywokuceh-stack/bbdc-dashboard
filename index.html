@@ -37,6 +37,11 @@ nav::-webkit-scrollbar{display:none}
 .tab,.chip{border:0;border-radius:16px;padding:6px 12px;background:var(--card);color:var(--text);font:inherit;font-size:14px;white-space:nowrap;cursor:pointer}
 .tab.on,.chip.on{background:var(--btn);color:var(--btn-text)}
 .card .chip:not(.on){background:var(--bg)}
+.row.dim{opacity:.55}
+.ageline{display:flex;align-items:center;gap:8px}
+.ageline .chip{padding:2px 10px}
+#toast{display:none;position:fixed;left:12px;right:12px;bottom:70px;z-index:5;background:var(--text);color:var(--bg);
+  border-radius:10px;padding:10px 12px;font-size:14px;text-align:center;white-space:pre-line}
 .sech{margin:14px 2px 2px;color:var(--hint);font-size:13px;text-transform:uppercase;letter-spacing:.04em}
 .seg .tab{flex:1}
 .pickwrap{position:relative;display:inline-block}
@@ -69,7 +74,8 @@ select{font:inherit;padding:6px;border-radius:8px;background:var(--bg);color:var
 </style>
 </head>
 <body>
-<header><h1>🏍️ BBDC Dashboard</h1><div id="age" class="hint"></div></header>
+<header><h1>🏍️ BBDC Dashboard</h1><div id="age" class="hint ageline"></div></header>
+<div id="toast"></div>
 <nav id="tabs"></nav>
 <main id="view"><p class="hint">Loading…</p></main>
 <div id="savebar"><button class="btn" id="savebtn"></button></div>
@@ -272,23 +278,28 @@ function viewSlots(){
 }
 
 function viewWatch(){
-  if (!D.w.length) return [el("div", {class: "card"}, "No lessons learned yet. Open a lesson's slot page once in the bot's browser on the PC.")];
+  if (!D.w.length) return [el("div", {class: "card"}, "No lessons yet. Send /progress in the chat so I can load your lesson list from BBDC.")];
   const out = [];
   for (const [sec, ws] of groupBySec(D.w, w => w.k)){
    const card = el("div", {class: "card"});
    out.push(secHead(sec), card);
    for (const w of ws){
     const marks = (w.nw ? " 🆕" : "") + (w.fl ? " 🎯" : "");
-    card.append(el("label", {class: "row"},
+    const fixed = !!(w.dn || w.cw);                      // completed / can't watch: nothing to switch
+    const box = {type: "checkbox", checked: curOn(w.k), onchange: e => { E.w[w.k] = e.target.checked; changed(); }};
+    if (fixed) box.disabled = "disabled";
+    card.append(el("label", {class: "row" + (fixed ? " dim" : "")},
       el("div", {class: "grow"}, el("div", null, nameOf(w.k) + marks),
-         el("div", {class: "hint"}, [w.dn ? "✅ Completed" : "", w.bk ? "📌 " + w.bk : "", w.n >= 0 ? w.n + " open" : ""]
+         el("div", {class: "hint"}, [w.dn ? "🎓 Completed" : "", w.cw ? "🚫 Can't watch yet (BBDC gives no slot list)" : "",
+                                     w.lk ? "🔒 Locked" + (w.nd ? " (after " + w.nd + ")" : "") + (curOn(w.k) ? " · starts when unlocked" : "") : "",
+                                     w.bk ? "📌 " + w.bk : "", w.n >= 0 ? w.n + " open" : ""]
                                       .filter(Boolean).join(" · ") || " ")),
       el("span", {class: "switch"},
-         el("input", {type: "checkbox", checked: curOn(w.k), onchange: e => { E.w[w.k] = e.target.checked; changed(); }}),
+         el("input", box),
          el("span"))));
    }
   }
-  return out.concat(el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates"));
+  return out.concat(el("p", {class: "hint"}, "📌 already booked · 🆕 just unlocked · 🎯 has its own dates · 🔒 picks wait until BBDC unlocks the lesson"));
 }
 
 /* what actually applies to a lesson: its own dates, or (if it has none) the bot's all-lessons dates */
@@ -370,18 +381,20 @@ function viewStatus(){
   const out = [el("div", {class: "card"}, lines.map(l => el("div", {class: "row"}, l)))];
   const acts = D.st === "running" ? [["/check","🔄 Check now"],["/pause","⏸️ Pause"]] : [["/go","▶️ Start watching"]];
   for (const [c, name] of acts) out.push(el("button", {class: "btn" + (c === "/pause" ? " alt" : ""), onclick: () => send(c)}, name));
-  out.push(el("p", {class: "hint"}, "Buttons close the dashboard and send the command (plus any unsaved changes) to the bot."));
+  out.push(el("p", {class: "hint"}, LIVE.on ? "Buttons send the command (plus any unsaved changes) straight to the bot."
+    : "Buttons close the dashboard and send the command (plus any unsaved changes) to the bot."));
   return out;
 }
 
 const VIEWS = {slots: viewSlots, watch: viewWatch, filters: viewFilters, bookings: viewBookings, progress: viewProgress, status: viewStatus};
 
 function render(){
+  renderAge();
   renderTabs();
   const v = $("#view"); v.textContent = "";
   if (D.tr) v.append(el("div", {class: "banner"}, "Some details were left out to fit. Send /slots or /bookings in the chat for everything."));
   v.append(...VIEWS[UI.tab]());
-  if (!IN_TG) v.append(el("p", {class: "hint"}, "Open this from the 📱 Dashboard button in the bot's chat to save changes."));
+  if (!IN_TG && !LIVE.on) v.append(el("p", {class: "hint"}, "Open this from the 📱 Dashboard button in the bot's chat to save changes."));
 }
 
 function changed(){
@@ -396,10 +409,57 @@ function changed(){
   render();
 }
 
-function send(cmd){
+/* ---------------- 🟢 live link (the bot's API through its tunnel), else 📦 snapshot ---------------- */
+const LIVE = {api: "", key: "", on: false, at: 0, busy: false};
+function liveHeaders(){ return {"X-App-Key": LIVE.key, "X-Init-Data": (TG && TG.initData) || ""}; }
+
+async function fetchLive(){
+  if (!LIVE.api || LIVE.busy) return false;
+  LIVE.busy = true;
+  try {
+    const r = await fetch(LIVE.api + "/api/state", {headers: liveHeaders(), cache: "no-store"});
+    const j = r.ok ? await r.json() : null;
+    if (j && j.v === 1){ D = j; LIVE.on = true; LIVE.at = now(); }
+    else LIVE.on = false;
+  } catch (e) { LIVE.on = false; }
+  LIVE.busy = false;
+  render();
+  return LIVE.on;
+}
+
+function renderAge(){
+  const a = $("#age"); a.textContent = "";
+  a.append(el("span", {class: "grow"}, LIVE.on ? "🟢 Live · updated " + new Date(LIVE.at * 1000).toLocaleTimeString("en-GB")
+    : "📦 Snapshot from " + hhmm(D.at) + " (" + ago(D.at, now()) + ")" + (LIVE.api ? " · live link not reachable" : ". Send /app for fresh data.")));
+  if (LIVE.api) a.append(el("button", {class: "chip", onclick: () => { toast("🔄 Refreshing…"); fetchLive().then(ok => toast(ok ? "🟢 Up to date" : "📦 Couldn't reach the bot")); }}, "🔄"));
+}
+
+let toastTimer = 0;
+function toast(msg){
+  const t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = "none"; }, 3500);
+}
+
+function resetEdits(){
+  E.w = {}; E.f = {};
+  if (IN_TG && TG.MainButton) TG.MainButton.hide();
+  $("#savebar").style.display = "none";
+}
+
+async function send(cmd){
   const p = buildPayload(D, E, cmd);
   if (!countChanges(p) && !p.c) return;
   if (payloadBytes(p) > MAX_SEND){ alert("Too many changes at once. Save some, then reopen the dashboard."); return; }
+  if (LIVE.on){                                    // 🟢 save in place: the dashboard stays open
+    toast("💾 Saving…");
+    try {
+      const r = await fetch(LIVE.api + "/api/action", {method: "POST", cache: "no-store",
+        headers: Object.assign({"Content-Type": "application/json"}, liveHeaders()), body: JSON.stringify(p)});
+      const j = await r.json();
+      if (r.ok && j.ok){ resetEdits(); toast(j.msg || "✅ Saved"); await fetchLive(); return; }
+    } catch (e) {}
+    LIVE.on = false;                               // live link failed: fall back to Telegram below
+  }
   if (!IN_TG){ alert("Open this from the 📱 Dashboard button in Telegram to save."); return; }
   TG.sendData(JSON.stringify(p));                 // Telegram closes the app and gives this to the bot
 }
@@ -423,12 +483,18 @@ async function start(testHash){              // testHash: lets a test feed a sna
   if (!hashParam(hash, "d") && TG && window.Telegram.WebView && window.Telegram.WebView.initParams)
     hash = "#d=" + (window.Telegram.WebView.initParams.d || "");
   try { D = await decode(hash); } catch (e) { fail(e.message); return; }
-  $("#age").textContent = "Data from " + hhmm(D.at) + " (" + ago(D.at, now()) + "). Send /app for fresh data.";
-  render();
+  LIVE.api = decodeURIComponent(hashParam(hash, "api") || "");
+  LIVE.key = hashParam(hash, "k");
+  if (!/^https:\/\/[a-z0-9.-]+$/i.test(LIVE.api)) LIVE.api = "";   // only a plain https host, nothing else
+  render();                                        // the snapshot shows at once…
+  if (LIVE.api){
+    await fetchLive();                             // …then the live data replaces it
+    setInterval(() => { if (document.visibilityState === "visible") fetchLive(); }, 30000);
+  }
 }
 
 window.BBDCApp = {hashParam, decode, buildPayload, countChanges, payloadBytes, niceDate, filterShort, origFilter,
-                  ampm, loginText, get D(){ return D; }, E, UI, render, send, start};
+                  ampm, loginText, get D(){ return D; }, E, UI, render, send, start, LIVE, fetchLive};
 start();
 </script>
 </body>
